@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { handleUpload as sdkHandleUpload } from '@vercel/blob/client';
 import { FILE_PREFIX, MAX_FILE_BYTES, makeFilePath, parseFilePath } from '../lib/file-paths.js';
 import { createFilesHandler, createDownloadHandler, createUploadHandler, MAX_UPLOAD_REQUEST_BYTES } from '../lib/files-handler.js';
@@ -195,7 +195,7 @@ test('downloads preserve every binary byte and the original Unicode name as a sa
   assert.equal(response.headers.get('content-type'), 'application/octet-stream');
   assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.equal(response.headers.get('content-length'), String(bytes.byteLength));
+  assert.equal(response.headers.get('content-length'), null);
   const disposition = response.headers.get('content-disposition');
   assert.match(disposition, /^attachment; filename="[A-Za-z0-9 ._()-]+"; filename\*=UTF-8''/);
   assert.equal(decodeURIComponent(disposition.split("filename*=UTF-8''")[1]), name);
@@ -206,7 +206,7 @@ test('empty files download and missing files or bad cloud responses never return
   const empty = createDownloadHandler({ logError: noLog, async get() { return { statusCode: 200, stream: new Response(new Uint8Array()).body, blob: { size: 0 } }; } });
   const response = await empty(request(`download?path=${encodeURIComponent(PATH)}`));
   assert.equal(response.status, 200);
-  assert.equal(response.headers.get('content-length'), '0');
+  assert.equal(response.headers.get('content-length'), null);
   assert.equal((await response.arrayBuffer()).byteLength, 0);
   for (const [get, status] of [
     [async () => null, 404], [async () => ({ statusCode: 304, stream: null }), 503],
@@ -215,6 +215,33 @@ test('empty files download and missing files or bad cloud responses never return
     const handler = createDownloadHandler({ get, logError: noLog });
     assert.equal((await handler(request(`download?path=${encodeURIComponent(PATH)}`))).status, status);
   }
+});
+
+test('chunked Blob downloads retain all 6 MiB when SDK metadata reports unknown length as zero', async () => {
+  const bytes = Uint8Array.from({ length: 6 * 1024 * 1024 }, (_, index) => (index * 37 + 19) % 256);
+  const expectedHash = createHash('sha256').update(bytes).digest('hex');
+  const handler = createDownloadHandler({ logError: noLog, async get() {
+    // @vercel/blob 2.8.2 sets blob.size=0 when the upstream response has no
+    // Content-Length. A real multipart upload can be served this way.
+    let offset = 0;
+    return {
+      statusCode: 200,
+      headers: new Headers(),
+      stream: new ReadableStream({ pull(controller) {
+        if (offset >= bytes.byteLength) return controller.close();
+        const end = Math.min(offset + 64 * 1024, bytes.byteLength);
+        controller.enqueue(bytes.slice(offset, end));
+        offset = end;
+      } }),
+      blob: { size: 0 },
+    };
+  } });
+  const response = await handler(request(`download?path=${encodeURIComponent(PATH)}`));
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('content-length'), null);
+  const downloaded = new Uint8Array(await response.arrayBuffer());
+  assert.equal(downloaded.byteLength, bytes.byteLength);
+  assert.equal(createHash('sha256').update(downloaded).digest('hex'), expectedHash);
 });
 
 test('downloads and deletes cannot access notes, URLs or files outside the managed namespace', async () => {
