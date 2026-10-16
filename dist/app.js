@@ -155,6 +155,7 @@ function closeLibrary() {
 }
 
 function selectNote(id) {
+  $('show-notes')?.click();
   rememberView();
   state.activeId = id;
   save();
