@@ -138,7 +138,7 @@ docs/assets/         README artwork
 
 The app uses plain HTML, CSS, and JavaScript. esbuild bundles the uploader into `dist/files.js`; the other interface files live directly in `dist/`.
 
-## Checks
+############## Checks
 
 ```bash
 npm test
