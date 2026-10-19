@@ -10,7 +10,7 @@
 
 ## One link. Two ways to stay connected.
 
-### A place for your words
+## A place for your words
 
 Type or paste text into a note and let cloud autosave take care of it. Keep spacing, line breaks, and Unicode intact. Give notes titles, search your library, or switch to focus mode when you want room to write.
 
