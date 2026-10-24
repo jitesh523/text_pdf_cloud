@@ -219,3 +219,63 @@ test('a corrupt cloud document cannot be overwritten by a browser autosave', asy
   assert.equal(cloud.calls.put.length, 0);
   assert.deepEqual(cloud.snapshot().state, { version: 1, notes: [] });
 });
+
+for (const method of ['GET', 'PUT']) {
+  test(`${method} stops oversized stored cloud reads before buffering the entire document`, async () => {
+    const chunkSize = 64 * 1024;
+    let pulls = 0;
+    let cancelled = false;
+    let writes = 0;
+    const stream = new ReadableStream({
+      pull(controller) {
+        pulls++;
+        if (pulls <= 32) controller.enqueue(new Uint8Array(chunkSize));
+        else controller.close();
+      },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    const handler = createNotesHandler({
+      get: async () => ({ statusCode: 200, stream, blob: { etag: '"v1"' } }),
+      put: async () => { writes++; return { etag: '"v2"' }; },
+      logError() {},
+    });
+
+    const response = await handler(method === 'GET'
+      ? request() : request('PUT', { state: stateWith('replacement'), etag: '"v1"' }));
+
+    assert.equal(response.status, 503);
+    assert.equal(cancelled, true);
+    assert.equal(pulls, MAX_NOTES_BYTES / chunkSize + 1);
+    assert.equal(stream.locked, false);
+    assert.equal(writes, 0);
+  });
+}
+
+test('stored cloud reads accept the exact byte limit and preserve Unicode split across chunks', async () => {
+  const state = stateWith('ह');
+  const encoder = new TextEncoder();
+  const padding = MAX_NOTES_BYTES - encoder.encode(JSON.stringify(state)).byteLength;
+  state.notes[0].content += 'x'.repeat(padding);
+  const bytes = encoder.encode(JSON.stringify(state));
+  assert.equal(bytes.byteLength, MAX_NOTES_BYTES);
+  const split = bytes.indexOf(0xe0) + 1;
+  assert.ok(split > 0);
+  const chunks = [bytes.slice(0, split), bytes.slice(split, split + 1), bytes.slice(split + 1)];
+  const stream = new ReadableStream({
+    pull(controller) {
+      if (chunks.length) controller.enqueue(chunks.shift());
+      else controller.close();
+    },
+  }, { highWaterMark: 0 });
+  const handler = createNotesHandler({
+    get: async () => ({ statusCode: 200, stream, blob: { etag: '"v1"' } }),
+    put: async () => { throw new Error('unexpected write'); },
+    logError() {},
+  });
+
+  const response = await handler(request());
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { state, etag: '"v1"' });
+  assert.equal(stream.locked, false);
+});
